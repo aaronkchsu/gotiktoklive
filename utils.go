@@ -4,11 +4,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	pb "github.com/Davincible/gotiktoklive/proto"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
+
+const envelopeBusinessTypeSuperFanBox = 19
 
 func parseMsg(msg *pb.Message, warnHandler func(...interface{})) (out interface{}, err error) {
 	var pt proto.Message
@@ -36,11 +40,21 @@ func parseMsg(msg *pb.Message, warnHandler func(...interface{})) (out interface{
 			}
 
 			pt := pt.(*pb.WebcastMemberMessage)
-			if pt.Event != nil && pt.Event.EventDetails != nil {
+			displayType := eventDisplayType(pt.Event)
+			if displayType == "" {
+				displayType = parseCommonDisplayTextKey(msg.Binary)
+			}
+			if displayType != "" {
 				out = UserEvent{
-					Event: toUserType(pt.Event.EventDetails.DisplayType),
+					Event: toUserType(displayType),
 					User:  toUser(pt.User),
 				}
+				return
+			}
+
+			out = UserEvent{
+				Event: USER_JOIN,
+				User:  toUser(pt.User),
 			}
 		}()
 	case "WebcastRoomUserSeqMessage":
@@ -63,9 +77,15 @@ func parseMsg(msg *pb.Message, warnHandler func(...interface{})) (out interface{
 			}
 
 			pt := pt.(*pb.WebcastSocialMessage)
-			out = UserEvent{
-				Event: toUserType(pt.Event.EventDetails.DisplayType),
-				User:  toUser(pt.User),
+			displayType := eventDisplayType(pt.Event)
+			if displayType == "" {
+				displayType = parseCommonDisplayTextKey(msg.Binary)
+			}
+			if displayType != "" {
+				out = UserEvent{
+					Event: toUserType(displayType),
+					User:  toUser(pt.User),
+				}
 			}
 		}()
 	case "WebcastGiftMessage":
@@ -264,11 +284,16 @@ func parseMsg(msg *pb.Message, warnHandler func(...interface{})) (out interface{
 			pt := pt.(*pb.WebcastWishlistUpdateMessage)
 			out = pt
 		}()
+	case "WebcastBarrageMessage":
+		return parseBarrageEvent(msg.Binary)
+	case "WebcastEmoteChatMessage":
+		return parseEmoteEvent(msg.Binary)
+	case "WebcastSubNotifyMessage":
+		return parseSubNotifyEvent(msg.Binary)
 
 		// Unimplemented Events. Examples can be decoded at : https://protobuf-decoder.netlify.app/
 	case "WebcastEnvelopeMessage":
-		// Example: Ci4KFldlYmNhc3RFbnZlbG9wZU1lc3NhZ2UQhZab7qCftKViGIGWgM7G8KylYjABEjIKEzcwODI2ODgxODIxMzU1ODk2MzgaBm1hbGl2YVoTNzA4MjY3MDc0NTI4NDc3NDY1NxgC
-		return nil, nil
+		return parseSuperFanBoxEvent(msg.Binary)
 	case "WebcastGiftBroadcastMessage":
 		// Example: CkQKG1dlYmNhc3RHaWZ0QnJvYWRjYXN0TWVzc2FnZRCulrKEpuy0pWIYgpaFyNGiraViMAGKAQ5naWZ0X2V4cGVuc2l2ZRCFiM6wwIXJ8WAaiAIKZ2h0dHBzOi8vcDE2LXdlYmNhc3QudGlrdG9rY2RuLmNvbS9pbWcvbWFsaXZhL3dlYmNhc3QtdmEvOTZmMjk3MDYyNGE3OWNkNGQ5NWJlNzI4NDQ5ZDVjODl+dHBsdi1vYmouaW1hZ2UKZ2h0dHBzOi8vcDE5LXdlYmNhc3QudGlrdG9rY2RuLmNvbS9pbWcvbWFsaXZhL3dlYmNhc3QtdmEvOTZmMjk3MDYyNGE3OWNkNGQ5NWJlNzI4NDQ5ZDVjODl+dHBsdi1vYmouaW1hZ2USK3dlYmNhc3QtdmEvOTZmMjk3MDYyNGE3OWNkNGQ5NWJlNzI4NDQ5ZDVjODkqByNCMUNDQTMi/hAK1A4KGFdlYmNhc3RSb29tTm90aWZ5TWVzc2FnZRCulrKEpuy0pWIYgpaFyNGiraViIM+Vp6L/LzABQpoOCiVwbV9tdF9saXZlX2dpZnRfcGxhdGZvcm1fYW5ub3VuY2VtZW50EiJ7MDp1c2VyfSBzZW50IHsxOmdpZnR9IHRvIHsyOnVzZXJ9Gg4KCSNmZmZmZmZmZiCQAyKfBwgLqgGZBwqWBwiFiM6wwIXJ8WAaDVNvbGRpZXJHdXJsODJKjAYKugFodHRwczovL3AxNi1zaWduLnRpa3Rva2Nkbi11cy5jb20vdG9zLXVzZWFzdDUtYXZ0LTAwNjgtdHgvZjEzODBiMTY0MTBmZTFkMzY0MjBkZmRjMDAzYTY0NmJ+dHBsdi10aWt0b2stc2hyaW5rOjcyOjcyLndlYnA/eC1leHBpcmVzPTE2NDkxNTY0MDAmeC1zaWduYXR1cmU9QUY3JTJGeWc3VlNXZFAxT09KR1F6ZFBWM1UwS3MlM0QKrAFodHRwczovL3AxNi1zaWduLnRpa3Rva2Nkbi11cy5jb20vdG9zLXVzZWFzdDUtYXZ0LTAwNjgtdHgvZjEzODBiMTY0MTBmZTFkMzY0MjBkZmRjMDAzYTY0NmJ+YzVfMTAweDEwMC53ZWJwP3gtZXhwaXJlcz0xNjQ5MTU2NDAwJngtc2lnbmF0dXJlPUl4N3NZM2k2ZXolMkJjMVFhYWwyNGxQdHZrYm5jJTNECqwBaHR0cHM6Ly9wMTktc2lnbi50aWt0b2tjZG4tdXMuY29tL3Rvcy11c2Vhc3Q1LWF2dC0wMDY4LXR4L2YxMzgwYjE2NDEwZmUxZDM2NDIwZGZkYzAwM2E2NDZifmM1XzEwMHgxMDAud2VicD94LWV4cGlyZXM9MTY0OTE1NjQwMCZ4LXNpZ25hdHVyZT1FSFNwU01JZFNwMU1GdCUyRmo0cWozcnJDdnpSayUzRAqsAWh0dHBzOi8vcDE2LXNpZ24udGlrdG9rY2RuLXVzLmNvbS90b3MtdXNlYXN0NS1hdnQtMDA2OC10eC9mMTM4MGIxNjQxMGZlMWQzNjQyMGRmZGMwMDNhNjQ2Yn5jNV8xMDB4MTAwLmpwZWc/eC1leHBpcmVzPTE2NDkxNTY0MDAmeC1zaWduYXR1cmU9cWt0c3JsTGQlMkJ1d0J4ZVl1d0hNakN4NTFRTkElM0QSQDEwMHgxMDAvdG9zLXVzZWFzdDUtYXZ0LTAwNjgtdHgvZjEzODBiMTY0MTBmZTFkMzY0MjBkZmRjMDAzYTY0NmKyAQYIgQ8Qwhm6AQCCAgCyAg1zb2xkaWVyZ3VybDgy8gJMTVM0d0xqQUJBQUFBM1dKX0pRWGtpV01jaDBPeW92a3pVRUVfMXZvM1ZDU1ptdVFiRTBzNVVSSG1mLUM2YVdxOERPemZISktLNWtjeiItCAyyASgIli8SIQoObGl2ZV9naWZ0XzYwMzgSD1Rpa1RvayBVbml2ZXJzZRgBIusFCAuqAeUFCuIFCIWI4KSi4efZXhoMU2hhbmUgbGl0dGxlStMECrkBaHR0cHM6Ly9wMTYtc2lnbi1zZy50aWt0b2tjZG4uY29tL3Rvcy1hbGlzZy1hdnQtMDA2OC80MzNkZjRjZmJiMTE2OTliNmU3OGNlN2Q2ZDlhY2U1Nn50cGx2LXRpa3Rvay1zaHJpbms6NzI6NzIud2VicD94LWV4cGlyZXM9MTY0OTE1NjQwMCZ4LXNpZ25hdHVyZT0wckQzSGlWWSUyRlYlMkJmQSUyQm1FYmR6ZHgyUUphZUUlM0QKrAFodHRwczovL3AxNi1zaWduLXNnLnRpa3Rva2Nkbi5jb20vYXdlbWUvMTAweDEwMC90b3MtYWxpc2ctYXZ0LTAwNjgvNDMzZGY0Y2ZiYjExNjk5YjZlNzhjZTdkNmQ5YWNlNTYud2VicD94LWV4cGlyZXM9MTY0OTE1NjQwMCZ4LXNpZ25hdHVyZT01YnVHMk4yQUNTU0VSQnVPUkpUdDIlMkJLYUolMkZ3JTNECqgBaHR0cHM6Ly9wMTYtc2lnbi1zZy50aWt0b2tjZG4uY29tL2F3ZW1lLzEwMHgxMDAvdG9zLWFsaXNnLWF2dC0wMDY4LzQzM2RmNGNmYmIxMTY5OWI2ZTc4Y2U3ZDZkOWFjZTU2LmpwZWc/eC1leHBpcmVzPTE2NDkxNTY0MDAmeC1zaWduYXR1cmU9NU1QTjVodWFnWnVwODdqQVI1cm15dlF4empZJTNEEjsxMDB4MTAwL3Rvcy1hbGlzZy1hdnQtMDA2OC80MzNkZjRjZmJiMTE2OTliNmU3OGNlN2Q2ZDlhY2U1NrIBBwjuAhCiswW6AQCCAgCyAhJub3RvcmlvdXNfcC5pLmdfX1/yAkxNUzR3TGpBQkFBQUFDWlRTcE91bHlvUnVuRjBIOFM4em1yTURuY1AzeWw3OEVkeVo4R254S0tOVmpkVDJKcXNlY3ZZZFJ5NmRXTW5KEipzc2xvY2FsOi8vd2ViY2FzdF9naWZ0X2RpYWxvZz9naWZ0X2lkPTYwMzgYAzLmAQgFEuEBCOMCEBgaW2h0dHBzOi8vcDE2LXdlYmNhc3QudGlrdG9rY2RuLmNvbS9pbWcvYWxpc2cvd2ViY2FzdC1zZy9icm9hZGNhc3RfZ2lmdF9iZy5wbmd+dHBsdi1vYmouaW1hZ2UaW2h0dHBzOi8vcDE5LXdlYmNhc3QudGlrdG9rY2RuLmNvbS9pbWcvYWxpc2cvd2ViY2FzdC1zZy9icm9hZGNhc3RfZ2lmdF9iZy5wbmd+dHBsdi1vYmouaW1hZ2UiIHdlYmNhc3Qtc2cvYnJvYWRjYXN0X2dpZnRfYmcucG5nSg5naWZ0X2Jyb2FkY2FzdA==
 		return nil, nil
@@ -371,6 +396,398 @@ func toUser(u *pb.User) *User {
 	return &user
 }
 
+type protoField struct {
+	num    protowire.Number
+	typ    protowire.Type
+	varint uint64
+	bytes  []byte
+}
+
+type textValue struct {
+	Key            string
+	DefaultPattern string
+}
+
+func forEachField(b []byte, fn func(protoField) error) error {
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return protowire.ParseError(n)
+		}
+		b = b[n:]
+
+		field := protoField{num: num, typ: typ}
+		switch typ {
+		case protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			field.varint = v
+			b = b[n:]
+		case protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			field.bytes = v
+			b = b[n:]
+		case protowire.Fixed32Type:
+			_, n := protowire.ConsumeFixed32(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		case protowire.Fixed64Type:
+			_, n := protowire.ConsumeFixed64(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		}
+
+		if err := fn(field); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func parseText(b []byte) textValue {
+	var text textValue
+	_ = forEachField(b, func(field protoField) error {
+		if field.typ != protowire.BytesType {
+			return nil
+		}
+
+		switch field.num {
+		case 1:
+			text.Key = string(field.bytes)
+		case 2:
+			text.DefaultPattern = string(field.bytes)
+		}
+
+		return nil
+	})
+	return text
+}
+
+func parseCommonText(b []byte) textValue {
+	var text textValue
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 8 && field.typ == protowire.BytesType {
+			text = parseText(field.bytes)
+		}
+
+		return nil
+	})
+	return text
+}
+
+func parseCommonDisplayTextKey(b []byte) string {
+	var key string
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 1 && field.typ == protowire.BytesType {
+			key = parseCommonText(field.bytes).Key
+		}
+
+		return nil
+	})
+	return key
+}
+
+func parseUserBytes(b []byte) *User {
+	user := &User{}
+	_ = forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 1:
+			if field.typ == protowire.VarintType {
+				user.ID = int64(field.varint)
+			}
+		case 3:
+			if field.typ == protowire.BytesType {
+				user.Nickname = string(field.bytes)
+			}
+		case 9:
+			if field.typ == protowire.BytesType {
+				user.ProfilePicture = parseProfilePicture(field.bytes)
+			}
+		case 38:
+			if field.typ == protowire.BytesType {
+				user.Username = string(field.bytes)
+			}
+		}
+
+		return nil
+	})
+	return user
+}
+
+func parseProfilePicture(b []byte) *ProfilePicture {
+	profilePicture := &ProfilePicture{}
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 1 && field.typ == protowire.BytesType {
+			profilePicture.Urls = append(profilePicture.Urls, string(field.bytes))
+		}
+
+		return nil
+	})
+	return profilePicture
+}
+
+func parseBarrageEvent(b []byte) (interface{}, error) {
+	var content textValue
+	var commonBarrageContent textValue
+	var common textValue
+	user := &User{}
+
+	err := forEachField(b, func(field protoField) error {
+		if field.typ != protowire.BytesType {
+			return nil
+		}
+
+		switch field.num {
+		case 1:
+			common = parseCommonText(field.bytes)
+		case 5:
+			content = parseText(field.bytes)
+		case 24:
+			commonBarrageContent = parseText(field.bytes)
+		case 50:
+			user = parseUserBytes(field.bytes)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	displayType := firstNonEmpty(content.Key, commonBarrageContent.Key, common.Key)
+	if displayType == "" {
+		return nil, nil
+	}
+
+	normalized := strings.ToLower(displayType)
+	if strings.Contains(normalized, "ttlive_superfan_commentnotif_superfanjoined") {
+		return SuperFanEvent{
+			Join:           true,
+			DisplayType:    displayType,
+			DefaultPattern: firstNonEmpty(content.DefaultPattern, commonBarrageContent.DefaultPattern, common.DefaultPattern),
+			User:           user,
+		}, nil
+	}
+
+	if strings.Contains(normalized, "ttlive_superfan") {
+		return SuperFanEvent{
+			DisplayType:    displayType,
+			DefaultPattern: firstNonEmpty(content.DefaultPattern, commonBarrageContent.DefaultPattern, common.DefaultPattern),
+			User:           user,
+		}, nil
+	}
+
+	return nil, nil
+}
+
+func parseSuperFanBoxEvent(b []byte) (interface{}, error) {
+	event := SuperFanBoxEvent{}
+	err := forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 1:
+			if field.typ == protowire.BytesType {
+				event.DisplayType = parseCommonText(field.bytes).Key
+			}
+		case 2:
+			if field.typ == protowire.BytesType {
+				parseEnvelopeInfo(field.bytes, &event)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if event.BusinessType == envelopeBusinessTypeSuperFanBox ||
+		strings.Contains(strings.ToLower(event.DisplayType), "ttlive_superfanbox") {
+		return event, nil
+	}
+
+	return nil, nil
+}
+
+func parseEnvelopeInfo(b []byte, event *SuperFanBoxEvent) {
+	_ = forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 1:
+			if field.typ == protowire.BytesType {
+				event.EnvelopeID = string(field.bytes)
+			}
+		case 2:
+			if field.typ == protowire.VarintType {
+				event.BusinessType = int(field.varint)
+			}
+		case 4:
+			if field.typ == protowire.BytesType {
+				event.SendUserName = string(field.bytes)
+			}
+		case 5:
+			if field.typ == protowire.VarintType {
+				event.DiamondCount = int(field.varint)
+			}
+		case 6:
+			if field.typ == protowire.VarintType {
+				event.PeopleCount = int(field.varint)
+			}
+		case 8:
+			if field.typ == protowire.BytesType {
+				event.SendUserID = string(field.bytes)
+			}
+		case 11:
+			if field.typ == protowire.BytesType {
+				event.RoomID = string(field.bytes)
+			}
+		case 16:
+			if field.typ == protowire.VarintType {
+				event.SuperFanCount = int(field.varint)
+			}
+		}
+
+		return nil
+	})
+}
+
+func parseSubNotifyEvent(b []byte) (interface{}, error) {
+	event := SubNotifyEvent{User: &User{}}
+	err := forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 1:
+			if field.typ == protowire.BytesType {
+				event.DisplayType = parseCommonText(field.bytes).Key
+			}
+		case 2:
+			if field.typ == protowire.BytesType {
+				event.User = parseUserBytes(field.bytes)
+			}
+		case 3:
+			if field.typ == protowire.VarintType {
+				event.ExhibitionType = int(field.varint)
+			}
+		case 4:
+			if field.typ == protowire.VarintType {
+				event.SubMonth = int(field.varint)
+			}
+		case 5:
+			if field.typ == protowire.VarintType {
+				event.SubscribeType = int(field.varint)
+			}
+		case 6:
+			if field.typ == protowire.VarintType {
+				event.OldSubscribeStatus = int(field.varint)
+			}
+		case 8:
+			if field.typ == protowire.VarintType {
+				event.SubscribingStatus = int(field.varint)
+			}
+		case 9:
+			if field.typ == protowire.VarintType {
+				event.IsSend = field.varint != 0
+			}
+		case 10:
+			if field.typ == protowire.VarintType {
+				event.IsCustom = field.varint != 0
+			}
+		case 11:
+			if field.typ == protowire.VarintType {
+				event.GiftSource = int(field.varint)
+			}
+		case 14:
+			if field.typ == protowire.BytesType {
+				event.PackageID = string(field.bytes)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return event, nil
+}
+
+func parseEmoteEvent(b []byte) (interface{}, error) {
+	event := EmoteEvent{User: &User{}}
+	err := forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 2:
+			if field.typ == protowire.BytesType {
+				event.User = parseUserBytes(field.bytes)
+			}
+		case 3:
+			if field.typ == protowire.BytesType {
+				event.EmoteID, event.ImageURL = parseEmoteDetails(field.bytes)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if event.EmoteID == "" && event.ImageURL == "" {
+		return nil, nil
+	}
+
+	return event, nil
+}
+
+func parseEmoteDetails(b []byte) (emoteID, imageURL string) {
+	_ = forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 1:
+			if field.typ == protowire.BytesType {
+				emoteID = string(field.bytes)
+			}
+		case 2:
+			if field.typ == protowire.BytesType {
+				imageURL = parseEmoteImageURL(field.bytes)
+			}
+		}
+
+		return nil
+	})
+	return
+}
+
+func parseEmoteImageURL(b []byte) string {
+	var imageURL string
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 1 && field.typ == protowire.BytesType {
+			imageURL = string(field.bytes)
+		}
+
+		return nil
+	})
+	return imageURL
+}
+
+func eventDisplayType(event *pb.WebcastMessageEvent) string {
+	if event == nil || event.EventDetails == nil {
+		return ""
+	}
+	return event.EventDetails.DisplayType
+}
+
 func copyMap(m map[string]string) map[string]string {
 	out := make(map[string]string)
 	for key, value := range m {
@@ -380,13 +797,27 @@ func copyMap(m map[string]string) map[string]string {
 }
 
 func toUserType(displayType string) userEventType {
-	switch displayType {
-	case "pm_main_follow_message_viewer_2":
+	normalized := strings.ToLower(displayType)
+	switch {
+	case normalized == "pm_main_follow_message_viewer_2" ||
+		strings.Contains(normalized, "follow"):
 		return USER_FOLLOW
-	case "pm_mt_guidance_share":
+	case normalized == "pm_mt_guidance_share" ||
+		strings.Contains(normalized, "share"):
 		return USER_SHARE
-	case "live_room_enter_toast":
+	case normalized == "live_room_enter_toast" ||
+		strings.Contains(normalized, "enter") ||
+		strings.Contains(normalized, "join"):
 		return USER_JOIN
 	}
 	return userEventType(fmt.Sprintf("User type not implemented, please report: %s", displayType))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

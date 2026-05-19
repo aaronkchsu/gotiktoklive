@@ -61,6 +61,45 @@ type ControlEvent struct {
 	Action int
 }
 
+type SuperFanEvent struct {
+	Join           bool
+	DisplayType    string
+	DefaultPattern string
+	User           *User
+}
+
+type SuperFanBoxEvent struct {
+	BusinessType  int
+	EnvelopeID    string
+	SendUserName  string
+	SendUserID    string
+	DiamondCount  int
+	PeopleCount   int
+	SuperFanCount int
+	RoomID        string
+	DisplayType   string
+}
+
+type SubNotifyEvent struct {
+	User               *User
+	DisplayType        string
+	ExhibitionType     int
+	SubMonth           int
+	SubscribeType      int
+	OldSubscribeStatus int
+	SubscribingStatus  int
+	GiftSource         int
+	IsSend             bool
+	IsCustom           bool
+	PackageID          string
+}
+
+type EmoteEvent struct {
+	User     *User
+	EmoteID  string
+	ImageURL string
+}
+
 type MicBattleEvent struct {
 	Users []*User
 }
