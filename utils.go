@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/erni27/imcache"
 	pb "github.com/steampoweredtaco/gotiktoklive/proto"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 const (
-	messageHistoryTimeout = 15 * time.Minute
+	messageHistoryTimeout           = 15 * time.Minute
+	envelopeBusinessTypeSuperFanBox = 19
 )
 
 var (
@@ -122,12 +125,14 @@ func parseMsg(msg *pb.WebcastResponse_Message, warnHandler func(...interface{}),
 			isHistory:    msg.IsHistory || cachedHistory(pt.Common.MsgId),
 		}, nil
 	case *pb.WebcastMemberMessage:
+		common := pt.GetCommon()
+		displayType := firstNonEmpty(displayTextKey(common), pt.GetAction().String())
 		return UserEvent{
-			MessageID: pt.Common.MsgId,
-			Timestamp: pt.Common.CreateTime,
-			Event:     toUserType(pt.Action.String()),
+			MessageID: common.GetMsgId(),
+			Timestamp: common.GetCreateTime(),
+			Event:     toUserType(displayType),
 			User:      toUser(pt.User),
-			isHistory: msg.IsHistory || cachedHistory(pt.Common.MsgId),
+			isHistory: msg.IsHistory || cachedHistory(common.GetMsgId()),
 		}, nil
 	case *pb.WebcastLiveGameIntroMessage:
 		return RoomEvent{
@@ -154,13 +159,18 @@ func parseMsg(msg *pb.WebcastResponse_Message, warnHandler func(...interface{}),
 			isHistory: msg.IsHistory || cachedHistory(pt.Common.MsgId),
 		}, nil
 	case *pb.WebcastSocialMessage:
+		common := pt.GetCommon()
 		return UserEvent{
-			MessageID: pt.Common.MsgId,
-			Timestamp: pt.Common.CreateTime,
-			Event:     toUserType(pt.Common.DisplayText.Key),
+			MessageID: common.GetMsgId(),
+			Timestamp: common.GetCreateTime(),
+			Event:     toUserType(displayTextKey(common)),
 			User:      toUser(pt.User),
-			isHistory: msg.IsHistory || cachedHistory(pt.Common.MsgId),
+			isHistory: msg.IsHistory || cachedHistory(common.GetMsgId()),
 		}, nil
+	case *pb.WebcastBarrageMessage:
+		return toSuperFanEvent(pt, msg), nil
+	case *pb.WebcastEnvelopeMessage:
+		return toSuperFanBoxEvent(pt, msg), nil
 	case *pb.WebcastGiftMessage:
 		if pt.GiftId == 0 && pt.User == nil {
 			return nil, nil
@@ -194,6 +204,10 @@ func parseMsg(msg *pb.WebcastResponse_Message, warnHandler func(...interface{}),
 			Label:       pt.Common.DisplayText.String(),
 			isHistory:   msg.IsHistory || cachedHistory(pt.Common.MsgId),
 		}, nil
+	case *pb.WebcastSubNotifyMessage:
+		return toSubNotifyEvent(pt, msg), nil
+	case *pb.WebcastEmoteChatMessage:
+		return toEmoteEvent(pt, msg), nil
 
 	case *pb.WebcastQuestionNewMessage:
 		return QuestionEvent{
@@ -320,19 +334,20 @@ func toUser(u *pb.User) *User {
 	if u == nil {
 		return &User{}
 	}
-	username := u.IdStr
-	if u.IdStr == "" {
-		username = u.Nickname
-	}
+	username := firstNonEmpty(u.DisplayId, u.IdStr, u.Nickname)
 	user := User{
 		ID:       int64(u.Id),
 		Username: username,
 		Nickname: u.Nickname,
 	}
 
-	if u.AvatarLarge != nil && u.AvatarJpg.UrlList != nil {
+	if u.AvatarJpg != nil && u.AvatarJpg.UrlList != nil {
 		user.ProfilePicture = &ProfilePicture{
 			Urls: u.AvatarJpg.UrlList,
+		}
+	} else if u.AvatarLarge != nil && u.AvatarLarge.UrlList != nil {
+		user.ProfilePicture = &ProfilePicture{
+			Urls: u.AvatarLarge.UrlList,
 		}
 	}
 
@@ -369,6 +384,307 @@ func toUserIdentity(uid *pb.UserIdentity) *UserIdentity {
 	}
 }
 
+func toSuperFanEvent(pt *pb.WebcastBarrageMessage, msg *pb.WebcastResponse_Message) Event {
+	common := pt.GetCommon()
+	commonBarrageContent := parseBarrageCommonBarrageContent(msg.Payload)
+	displayType := firstNonEmpty(
+		textKey(pt.GetContent()),
+		commonBarrageContent.Key,
+		displayTextKey(common),
+	)
+	if displayType == "" {
+		return nil
+	}
+
+	normalized := strings.ToLower(displayType)
+	if !strings.Contains(normalized, "ttlive_superfan") {
+		return nil
+	}
+
+	return SuperFanEvent{
+		MessageID:      common.GetMsgId(),
+		Timestamp:      common.GetCreateTime(),
+		Join:           strings.Contains(normalized, "ttlive_superfan_commentnotif_superfanjoined"),
+		DisplayType:    displayType,
+		DefaultPattern: firstNonEmpty(textDefaultPattern(pt.GetContent()), commonBarrageContent.DefaultPattern, displayTextDefaultPattern(common)),
+		User:           barrageUser(pt),
+		isHistory:      msg.IsHistory || cachedHistory(common.GetMsgId()),
+	}
+}
+
+func barrageUser(pt *pb.WebcastBarrageMessage) *User {
+	if user := pt.GetUserGradeParam().GetUser(); user != nil {
+		return toUser(user)
+	}
+	if user := pt.GetFansLevelParam().GetUser(); user != nil {
+		return toUser(user)
+	}
+	return &User{}
+}
+
+func toSuperFanBoxEvent(pt *pb.WebcastEnvelopeMessage, msg *pb.WebcastResponse_Message) Event {
+	common := pt.GetCommon()
+	info := pt.GetEnvelopeInfo()
+	extras := parseEnvelopeExtras(msg.Payload)
+	businessType := int(info.GetBusinessType())
+	if extras.BusinessType != 0 {
+		businessType = extras.BusinessType
+	}
+
+	event := SuperFanBoxEvent{
+		MessageID:     common.GetMsgId(),
+		Timestamp:     common.GetCreateTime(),
+		BusinessType:  businessType,
+		EnvelopeID:    info.GetEnvelopeId(),
+		SendUserName:  info.GetSendUserName(),
+		SendUserID:    info.GetSendUserId(),
+		DiamondCount:  int(info.GetDiamondCount()),
+		PeopleCount:   int(info.GetPeopleCount()),
+		SuperFanCount: extras.SuperFanCount,
+		RoomID:        info.GetRoomId(),
+		DisplayType:   displayTextKey(common),
+		isHistory:     msg.IsHistory || cachedHistory(common.GetMsgId()),
+	}
+
+	if event.BusinessType == envelopeBusinessTypeSuperFanBox ||
+		strings.Contains(strings.ToLower(event.DisplayType), "ttlive_superfanbox") {
+		return event
+	}
+
+	return nil
+}
+
+func toSubNotifyEvent(pt *pb.WebcastSubNotifyMessage, msg *pb.WebcastResponse_Message) Event {
+	common := pt.GetCommon()
+	extras := parseSubNotifyExtras(msg.Payload)
+	return SubNotifyEvent{
+		MessageID:          common.GetMsgId(),
+		Timestamp:          common.GetCreateTime(),
+		User:               toUser(pt.GetUser()),
+		DisplayType:        displayTextKey(common),
+		ExhibitionType:     extras.ExhibitionType,
+		SubMonth:           int(pt.GetSubMonth()),
+		SubscribeType:      int(pt.GetSubscribeType()),
+		OldSubscribeStatus: int(pt.GetOldSubscribeStatus()),
+		SubscribingStatus:  int(pt.GetSubscribingStatus()),
+		GiftSource:         extras.GiftSource,
+		IsSend:             pt.GetIsSend(),
+		IsCustom:           pt.GetIsCustom(),
+		PackageID:          extras.PackageID,
+		isHistory:          msg.IsHistory || cachedHistory(common.GetMsgId()),
+	}
+}
+
+func toEmoteEvent(pt *pb.WebcastEmoteChatMessage, msg *pb.WebcastResponse_Message) Event {
+	emotes := make([]Emote, 0, len(pt.GetEmoteList()))
+	for _, emote := range pt.GetEmoteList() {
+		next := Emote{
+			ID:        emote.GetEmoteId(),
+			UUID:      emote.GetUuid(),
+			ImageURLs: imageURLs(emote.GetImage()),
+		}
+		if next.ID != "" || next.UUID != "" || len(next.ImageURLs) > 0 {
+			emotes = append(emotes, next)
+		}
+	}
+	if len(emotes) == 0 {
+		return nil
+	}
+
+	common := pt.GetCommon()
+	return EmoteEvent{
+		MessageID: common.GetMsgId(),
+		Timestamp: common.GetCreateTime(),
+		User:      toUser(pt.GetUser()),
+		Emotes:    emotes,
+		isHistory: msg.IsHistory || cachedHistory(common.GetMsgId()),
+	}
+}
+
+func displayTextKey(common *pb.Common) string {
+	return textKey(common.GetDisplayText())
+}
+
+func displayTextDefaultPattern(common *pb.Common) string {
+	return textDefaultPattern(common.GetDisplayText())
+}
+
+func textKey(text *pb.Text) string {
+	if text == nil {
+		return ""
+	}
+	return text.GetKey()
+}
+
+func textDefaultPattern(text *pb.Text) string {
+	if text == nil {
+		return ""
+	}
+	return text.GetDefaultPattern()
+}
+
+func imageURLs(image *pb.Image) []string {
+	if image == nil {
+		return nil
+	}
+	return append([]string(nil), image.GetUrlList()...)
+}
+
+type protoField struct {
+	num    protowire.Number
+	typ    protowire.Type
+	varint uint64
+	bytes  []byte
+}
+
+type textValue struct {
+	Key            string
+	DefaultPattern string
+}
+
+type envelopeExtras struct {
+	BusinessType  int
+	SuperFanCount int
+}
+
+type subNotifyExtras struct {
+	ExhibitionType int
+	GiftSource     int
+	PackageID      string
+}
+
+func forEachField(b []byte, fn func(protoField) error) error {
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return protowire.ParseError(n)
+		}
+		b = b[n:]
+
+		field := protoField{num: num, typ: typ}
+		switch typ {
+		case protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			field.varint = v
+			b = b[n:]
+		case protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			field.bytes = v
+			b = b[n:]
+		case protowire.Fixed32Type:
+			_, n := protowire.ConsumeFixed32(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		case protowire.Fixed64Type:
+			_, n := protowire.ConsumeFixed64(b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
+			b = b[n:]
+		}
+
+		if err := fn(field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseTextBytes(b []byte) textValue {
+	var text textValue
+	_ = forEachField(b, func(field protoField) error {
+		if field.typ != protowire.BytesType {
+			return nil
+		}
+
+		switch field.num {
+		case 1:
+			text.Key = string(field.bytes)
+		case 2:
+			text.DefaultPattern = string(field.bytes)
+		}
+
+		return nil
+	})
+	return text
+}
+
+func parseBarrageCommonBarrageContent(b []byte) textValue {
+	var text textValue
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 24 && field.typ == protowire.BytesType {
+			text = parseTextBytes(field.bytes)
+		}
+		return nil
+	})
+	return text
+}
+
+func parseEnvelopeExtras(b []byte) envelopeExtras {
+	var extras envelopeExtras
+	_ = forEachField(b, func(field protoField) error {
+		if field.num == 2 && field.typ == protowire.BytesType {
+			extras = parseEnvelopeInfoExtras(field.bytes)
+		}
+		return nil
+	})
+	return extras
+}
+
+func parseEnvelopeInfoExtras(b []byte) envelopeExtras {
+	var extras envelopeExtras
+	_ = forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 2:
+			if field.typ == protowire.VarintType {
+				extras.BusinessType = int(field.varint)
+			}
+		case 16:
+			if field.typ == protowire.VarintType {
+				extras.SuperFanCount = int(field.varint)
+			}
+		}
+		return nil
+	})
+	return extras
+}
+
+func parseSubNotifyExtras(b []byte) subNotifyExtras {
+	var extras subNotifyExtras
+	_ = forEachField(b, func(field protoField) error {
+		switch field.num {
+		case 3:
+			if field.typ == protowire.VarintType {
+				extras.ExhibitionType = int(field.varint)
+			}
+		case 11:
+			if field.typ == protowire.VarintType {
+				extras.GiftSource = int(field.varint)
+			}
+		case 14:
+			if field.typ == protowire.BytesType {
+				extras.PackageID = string(field.bytes)
+			}
+		}
+		return nil
+	})
+	return extras
+}
+
 func copyMap(m map[string]string) map[string]string {
 	out := make(map[string]string)
 	for key, value := range m {
@@ -378,15 +694,27 @@ func copyMap(m map[string]string) map[string]string {
 }
 
 func toUserType(displayType string) userEventType {
-	switch displayType {
-	case "pm_main_follow_message_viewer_2":
+	normalized := strings.ToLower(displayType)
+	switch {
+	case normalized == "pm_main_follow_message_viewer_2" ||
+		strings.Contains(normalized, "follow"):
 		return USER_FOLLOW
-	case "pm_mt_guidance_share":
+	case normalized == "pm_mt_guidance_share" ||
+		strings.Contains(normalized, "share"):
 		return USER_SHARE
-	case "live_room_enter_toast":
-		return USER_JOIN
-	case "JOINED":
+	case normalized == "live_room_enter_toast" ||
+		strings.Contains(normalized, "enter") ||
+		strings.Contains(normalized, "join"):
 		return USER_JOIN
 	}
 	return userEventType(fmt.Sprintf("User type not implemented, please report: %s", displayType))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -164,6 +164,94 @@ func (c ControlEvent) CreatedTimestamp() int64 {
 	return c.Timestamp
 }
 
+type SuperFanEvent struct {
+	MessageID      int64
+	Timestamp      int64
+	Join           bool
+	DisplayType    string
+	DefaultPattern string
+	User           *User
+	isHistory      bool
+}
+
+func (s SuperFanEvent) IsHistory() bool {
+	return s.isHistory
+}
+
+func (s SuperFanEvent) CreatedTimestamp() int64 {
+	return s.Timestamp
+}
+
+type SuperFanBoxEvent struct {
+	MessageID     int64
+	Timestamp     int64
+	BusinessType  int
+	EnvelopeID    string
+	SendUserName  string
+	SendUserID    string
+	DiamondCount  int
+	PeopleCount   int
+	SuperFanCount int
+	RoomID        string
+	DisplayType   string
+	isHistory     bool
+}
+
+func (s SuperFanBoxEvent) IsHistory() bool {
+	return s.isHistory
+}
+
+func (s SuperFanBoxEvent) CreatedTimestamp() int64 {
+	return s.Timestamp
+}
+
+type SubNotifyEvent struct {
+	MessageID          int64
+	Timestamp          int64
+	User               *User
+	DisplayType        string
+	ExhibitionType     int
+	SubMonth           int
+	SubscribeType      int
+	OldSubscribeStatus int
+	SubscribingStatus  int
+	GiftSource         int
+	IsSend             bool
+	IsCustom           bool
+	PackageID          string
+	isHistory          bool
+}
+
+func (s SubNotifyEvent) IsHistory() bool {
+	return s.isHistory
+}
+
+func (s SubNotifyEvent) CreatedTimestamp() int64 {
+	return s.Timestamp
+}
+
+type Emote struct {
+	ID        string
+	UUID      string
+	ImageURLs []string
+}
+
+type EmoteEvent struct {
+	MessageID int64
+	Timestamp int64
+	User      *User
+	Emotes    []Emote
+	isHistory bool
+}
+
+func (e EmoteEvent) IsHistory() bool {
+	return e.isHistory
+}
+
+func (e EmoteEvent) CreatedTimestamp() int64 {
+	return e.Timestamp
+}
+
 type MicBattleEvent struct {
 	MessageID int64
 	Timestamp int64
